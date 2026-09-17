@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raspberry Pi 모니터</title>
+<!-- 브라우저(접속하는 PC/폰)가 인터넷에 연결돼 있어야 로드됨.
+     오프라인 환경이면 이 파일을 static/ 폴더에 내려받고
+     src="{{ url_for('static', filename='chart.umd.min.js') }}" 로 바꾸면 된다. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #14181d; --panel: #1c2229; --line: #2b333c;
+    --text: #e6e9ec; --muted: #8b96a1;
+    --ok: #4fc3a1; --warm: #ff9f43; --hot: #ff5d5d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding: 18px 28px; border-bottom: 1px solid var(--line);
+  }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  .now { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--ok); }
+  .now small { font-size: 14px; color: var(--muted); margin-left: 6px; font-weight: 400; }
+  main {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 20px 28px;
+  }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 16px;
+  }
+  section h2 { margin: 0 0 12px; font-size: 14px; font-weight: 500; color: var(--muted); }
+  img.cam {
+    width: 100%; aspect-ratio: 4 / 3; object-fit: contain;
+    background: #000; border-radius: 4px; display: block;
+  }
+  .chart-wrap { position: relative; height: 340px; }
+  .status { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Raspberry Pi 5</h1>
+  <div class="now"><span id="tempNow">--</span><small>°C CPU</small></div>
+</header>
+
+<main>
+  <section>
+    <h2>웹캠</h2>
+    <img class="cam" src="{{ url_for('video_feed') }}" alt="웹캠 스트림">
+  </section>
+
+  <section>
+    <h2>CPU 온도 · 최근 {{ (history_len * poll_ms / 60000) | round(1) }}분</h2>
+    <div class="chart-wrap"><canvas id="chart"></canvas></div>
+    <p class="status" id="status">연결 중…</p>
+  </section>
+</main>
+
+<script>
+  const MAX_POINTS = {{ history_len }};
+  const POLL_MS    = {{ poll_ms }};
+
+  const css = getComputedStyle(document.documentElement);
+  const color = name => css.getPropertyValue(name).trim();
+  const fmtTime = t => new Date(t * 1000).toLocaleTimeString('ko-KR', { hour12: false });
+
+  const nowEl    = document.getElementById('tempNow');
+  const statusEl = document.getElementById('status');
+
+  const chart = new Chart(document.getElementById('chart'), {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        data: [],
+        borderColor: color('--warm'),
+        backgroundColor: 'rgba(255, 159, 67, 0.15)',
+        fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2,
+      }]
+    },
+    options: {
+      animation: false, responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: c => c.parsed.y + ' °C' } }
+      },
+      scales: {
+        x: { ticks: { color: color('--muted'), maxTicksLimit: 8, maxRotation: 0 },
+             grid:  { color: color('--line') } },
+        y: { suggestedMin: 30, suggestedMax: 80,
+             ticks: { color: color('--muted'), callback: v => v + '°' },
+             grid:  { color: color('--line') } }
+      }
+    }
+  });
+
+  function push(p) {
+    chart.data.labels.push(fmtTime(p.t));
+    chart.data.datasets[0].data.push(p.temp);
+    while (chart.data.labels.length > MAX_POINTS) {
+      chart.data.labels.shift();
+      chart.data.datasets[0].data.shift();
+    }
+  }
+
+  function showNow(temp) {
+    nowEl.textContent = temp.toFixed(1);
+    nowEl.parentElement.style.color =
+      temp >= 75 ? color('--hot') : temp >= 60 ? color('--warm') : color('--ok');
+  }
+
+  let lastT = 0;
+
+  async function poll() {
+    try {
+      const p = await (await fetch('/api/temp')).json();
+      if (p.temp !== null && p.t !== lastT) {
+        lastT = p.t;
+        push(p);
+        chart.update();
+        showNow(p.temp);
+      }
+      statusEl.textContent = '마지막 갱신 ' + fmtTime(p.t);
+    } catch (e) {
+      statusEl.textContent = '서버와 연결이 끊겼습니다. 다시 시도하는 중…';
+    }
+  }
+
+  (async () => {
+    try {
+      const hist = await (await fetch('/api/temp/history')).json();
+      hist.forEach(push);
+      chart.update();
+      if (hist.length) {
+        lastT = hist[hist.length - 1].t;
+        showNow(hist[hist.length - 1].temp);
+      }
+    } catch (e) { /* 이력이 없어도 폴링은 계속 */ }
+    setInterval(poll, POLL_MS);
+  })();
+</script>
+</body>
+</html>
