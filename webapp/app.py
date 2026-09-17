@@ -1,5 +1,5 @@
 """
-Raspberry Pi 5 + Flask : 웹캠 스트림 + CPU 온도 그래프
+Raspberry Pi 5 + Flask : 웹캠 스트림(YOLO 객체 인식) + CPU 온도 그래프
 
 실행:  python3 app.py
 접속:  http://<라즈베리파이 IP>:5000   (IP는 `hostname -I` 로 확인)
@@ -15,6 +15,7 @@ import threading
 from collections import deque
 
 from flask import Flask, Response, jsonify, render_template
+from ultralytics import YOLO
 
 # ── 설정 ─────────────────────────────────────────────────────────
 USE_PICAMERA2 = False   # 라즈베리파이 카메라 모듈(CSI 리본 케이블)이면 True, USB 웹캠이면 False
@@ -24,6 +25,7 @@ FRAME_HEIGHT  = 480
 JPEG_QUALITY  = 80      # 1~100, 높을수록 선명하지만 대역폭 증가
 TEMP_INTERVAL = 1.0     # CPU 온도 측정 주기(초)
 TEMP_HISTORY  = 300     # 그래프에 유지할 데이터 개수 (300개 × 1초 = 최근 5분)
+YOLO_MODEL_PATH = "../scripts/yolov8n_ncnn_model"  # 실제 모델 폴더 경로로 수정
 
 app = Flask(__name__)
 camera = None
@@ -31,12 +33,13 @@ camera = None
 
 # ── 카메라 ────────────────────────────────────────────────────────
 class Camera:
-    """백그라운드 스레드에서 프레임을 계속 읽어 최신 JPEG 한 장을 보관한다.
-    브라우저가 여러 개 접속해도 카메라는 한 번만 열린다."""
+    """백그라운드 스레드에서 프레임을 계속 읽어 YOLO로 인식한 최신 JPEG 한 장을 보관한다.
+    브라우저가 여러 개 접속해도 카메라와 모델은 한 번만 연다."""
 
     def __init__(self):
         import cv2
         self.cv2 = cv2
+        self.model = YOLO(YOLO_MODEL_PATH)
         self.frame = None
         self.seq = 0                       # 새 프레임마다 1씩 증가 (중복 전송 방지용)
         self.lock = threading.Lock()
@@ -72,6 +75,10 @@ class Camera:
                 if not ok:
                     time.sleep(0.05)
                     continue
+
+            results = self.model(frame, verbose=False)
+            frame = results[0].plot()
+
             ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
             if ok:
                 with self.lock:
